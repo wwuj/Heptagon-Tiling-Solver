@@ -1,0 +1,333 @@
+clc;
+clear all;
+r1bian = [1,-1,0,0,0,0,0; 0,0,1,0,0,-1,0];
+r1jiao = [0,3,0,0,0,0,0,2; 1,0,1,0,0,0,1,2; 0,0,0,1,1,1,0,2];
+r2bian = [1,-1,0,0,0,0,0; 1,0,-1,0,0,0,0; 0,0,0,0,1,-1,0];
+r2jiao = [3,0,0,0,0,0,0,2; 0,3,0,0,0,0,0,2; 0,0,3,0,0,0,0,2; ...
+          0,0,0,3,0,0,0,2; 0,0,0,0,2,1,0,2; 0,0,0,0,0,1,2,2];
+r3bian = [1,-1,0,0,0,0,0; 0,0,1,0,-1,0,0; 0,0,0,1,0,0,-1];
+r3jiao = [0,3,0,0,0,0,0,2; 1,0,1,0,1,0,0,2; 0,0,0,1,0,1,1,2];
+r4bian = [1,-1,0,0,0,0,0; 0,1,-1,0,0,0,0; 0,0,1,-1,0,0,0; ...
+          0,0,1,0,-1,0,0; 0,0,0,1,0,-1,0];
+r4jiao = [0,2,0,1,0,0,0,2; 1,0,0,0,0,2,0,2; 1,0,0,1,1,0,0,2; ...
+          1,0,1,0,0,1,0,2; 1,1,0,0,0,0,1,2; 2,0,0,0,0,1,0,2];
+r5bian = [1,-1,0,0,0,0,0; 1,0,0,-1,0,0,0; 1,0,0,0,-1,0,0; ...
+          0,0,1,0,0,0,-1; 0,0,0,1,0,-1,0];
+r5jiao = [0,0,0,0,2,1,0,2; 0,0,0,2,1,0,0,2; 0,0,1,0,0,1,1,2; ...
+          0,1,2,0,0,0,0,2; 1,0,0,1,0,1,0,2; 1,1,0,0,0,0,1,2];
+seeds = struct('bian', {r1bian,r2bian,r3bian,r4bian,r5bian}, 'jiao', {r1jiao,r2jiao, r3jiao,r4jiao,r5jiao});
+known_pool = generate_pool(seeds);
+
+
+% --- 辅助函数：向量字典序比较 ---
+function res = compare_vectors(v1, v2)
+    % 如果 v1 < v2 返回 -1 (更新)
+    % 如果 v1 > v2 返回 1 (不更新)
+    % 如果相等 返回 0
+    diff = v1 - v2;
+    idx = find(diff ~= 0, 1);
+    if isempty(idx)
+        res = 0;
+    elseif diff(idx) < 0
+        res = -1;
+    else
+        res = 1;
+    end
+end
+
+%% --- 核心：MATLAB 重建矩阵函数 ---
+function [bian, jiao] = reconstruct_matrices(indices)
+    % indices: 1x7 array of 0-13
+
+    % 1. 定义 Neighbor States (必须与 C++ init_states 一致)
+    states = struct('inner', {}, 'right', {}, 'left', {}, 'ang_r', {}, 'ang_l', {});
+
+    % 辅助: get_angle_index
+    get_ang = @(u, v) helper_ang(u, v);
+
+    % 初始化 14 个状态
+    for i = 0:6 % CCW
+        s.inner = i; s.right = mod(i+1, 7); s.left = mod(i+6, 7);
+        s.ang_r = get_ang(i, s.right); s.ang_l = get_ang(i, s.left);
+        states(i+1) = s;
+    end
+    for i = 0:6 % CW (indices 7-13 mapped to 8-14 in MATLAB 1-based indexing)
+        s.inner = i; s.right = mod(i+6, 7); s.left = mod(i+1, 7);
+        s.ang_r = get_ang(i, s.right); s.ang_l = get_ang(i, s.left);
+        states(i+8) = s;
+    end
+
+    % 2. 构建 Bian
+    % indices is 0-based from C++, map to 1-based for states array
+    curr_states = indices + 1; 
+
+    rows_bian = zeros(14, 7); % Prealloc max
+    cnt_b = 0;
+
+    % Inner
+    for k = 0:6
+        u = k; 
+        v = states(curr_states(k+1)).inner;
+        if u ~= v
+            cnt_b = cnt_b + 1;
+            rows_bian(cnt_b, u+1) = rows_bian(cnt_b, u+1) + 1;
+            rows_bian(cnt_b, v+1) = rows_bian(cnt_b, v+1) - 1;
+        end
+    end
+    % Outer
+    for k = 0:6
+        next_k = mod(k+1, 7);
+        u = states(curr_states(k+1)).right;
+        v = states(curr_states(next_k+1)).left;
+        if u ~= v
+            cnt_b = cnt_b + 1;
+            rows_bian(cnt_b, u+1) = rows_bian(cnt_b, u+1) + 1;
+            rows_bian(cnt_b, v+1) = rows_bian(cnt_b, v+1) - 1;
+        end
+    end
+
+    if cnt_b == 0
+        bian = zeros(1, 7);
+    else
+        bian = rows_bian(1:cnt_b, :);
+    end
+
+    % 3. 构建 Jiao
+    jiao = zeros(7, 8);
+    for k = 0:6
+        prev_k = mod(k+6, 7);
+        ang_center = k;
+        ang_n_prev = states(curr_states(prev_k+1)).ang_r;
+        ang_n_curr = states(curr_states(k+1)).ang_l;
+
+        jiao(k+1, ang_center+1) = jiao(k+1, ang_center+1) + 1;
+        jiao(k+1, ang_n_prev+1) = jiao(k+1, ang_n_prev+1) + 1;
+        jiao(k+1, ang_n_curr+1) = jiao(k+1, ang_n_curr+1) + 1;
+        jiao(k+1, 8) = 2;
+    end
+end
+
+function val = helper_ang(u, v)
+    if u > v, [u,v] = deal(v,u); end
+    if u==0 && v==6, val=0;
+    elseif v == u+1, val=v;
+    else, val = -1; % Should not happen in valid topology
+    end
+end
+
+function pool = generate_pool(seed_structs)
+pool = {};
+for k = 1:length(seed_structs)
+B = seed_structs(k).bian;
+J = seed_structs(k).jiao;
+for is_flip = [false, true]
+        if is_flip
+            % 翻折逻辑修改：
+            
+            % 1. 边矩阵：直接左右翻转
+            B_curr = fliplr(B);
+            
+            % 2. 角矩阵：第一列不动，最后一列(第8列)不动，中间2:7列进行左右翻转
+            % 假设 J 至少有8列
+            J_curr = [J(:,1), fliplr(J(:,2:7)), J(:,8)];
+        else
+            B_curr = B;
+            J_curr = J;
+        end
+        
+        for shift = 0:6
+            % 轮换逻辑：矩阵向右平移 (circshift在第2维操作)
+            B_rot = circshift(B_curr, shift, 2);
+            
+            % 角矩阵轮换：通常前7列是循环部分，第8列是中心/固定部分
+            J_rot = [circshift(J_curr(:,1:7), shift, 2), J_curr(:,8)];
+            
+            pool{end+1} = struct('bian', B_rot, 'jiao', J_rot);
+        end
+    end
+end
+end
+
+function r = mysurerank(A)
+    if isempty(A), r = 0; else, r = rank(A); end
+end
+
+
+%% 1. Runtime configuration
+
+clc;
+clearvars -except known_pool; % Preserve an existing known_pool.
+
+% Force MATLAB to unload an old MEX binary before rebuilding it.
+if exist('all_basis_generator', 'file')
+    fprintf('>>> Unloading old all_basis_generator MEX module...\n');
+    clear('all_basis_generator');
+    clear mex;
+end
+
+Run_Mode = 2;    % 1: server, 2: laptop
+n = 7;           % Number of polygon sides, n >= 3.
+jieshu = 3;      % First n angle entries are nonnegative integers summing to jieshu.
+Target_RE = 0;   % Edge rank, 0 for angle-only; valid range 0..n-1.
+Target_RA = 3;   % Angle rank, 0 for edge-only; valid range 0..n.
+% Angle balance policy:
+%   0: no balance check (legacy behavior).
+%   1: existing weak check: ones(1,n) lies in the first-n-column row space.
+%   2: mode 1 plus strong balance on the completed legal angle-row list C.
+%      Require integers q_i>=1 and q>=1 such that
+%      sum_i q_i*C(i,1:n) = q*ones(1,n).
+%      The returned A_results still contains the original rank basis, not C.
+pingheng = 2;
+pu = 0;          % Only used when Target_RE=0: 0=S_n permutations, 1=D_n shifts/full reflection.
+
+validateattributes(n, {'numeric'}, {'scalar', 'integer', '>=', 3}, mfilename, 'n');
+validateattributes(jieshu, {'numeric'}, {'scalar', 'integer', 'positive'}, mfilename, 'jieshu');
+validateattributes(Target_RE, {'numeric'}, {'scalar', 'integer', '>=', 0, '<=', n - 1}, mfilename, 'Target_RE');
+validateattributes(Target_RA, {'numeric'}, {'scalar', 'integer', '>=', 0, '<=', n}, mfilename, 'Target_RA');
+validateattributes(pingheng, {'numeric', 'logical'}, ...
+    {'scalar', 'real', 'finite', 'integer', '>=', 0, '<=', 2}, ...
+    mfilename, 'pingheng');
+validateattributes(pu, {'numeric', 'logical'}, {'scalar', 'integer', '>=', 0, '<=', 1}, mfilename, 'pu');
+
+% The native interface accepts real double scalars.
+pingheng = double(pingheng);
+
+if Run_Mode == 1
+    Num_Threads = 62;
+    fprintf('>>> [Mode: Server] threads: %d\n', Num_Threads);
+else
+    Num_Threads = max(1, feature('numcores') - 1);
+    fprintf('>>> [Mode: Laptop] threads: %d\n', Num_Threads);
+end
+
+%% 2. Convert known_pool into dense arrays for the MEX interface
+
+if ~exist('known_pool', 'var') || isempty(known_pool)
+    warning('known_pool was not found in the workspace. Using an empty pool.');
+    known_pool = {};
+end
+
+if ~iscell(known_pool)
+    error('known_pool must be a cell array.');
+end
+
+num_known = numel(known_pool);
+max_kE = max(1, Target_RE);
+max_kA = max(1, Target_RA);
+
+for i = 1:num_known
+    if ~isstruct(known_pool{i}) || ...
+            ~isfield(known_pool{i}, 'bian') || ~isfield(known_pool{i}, 'jiao')
+        error('known_pool{%d} must be a struct containing bian and jiao.', i);
+    end
+
+    bian = known_pool{i}.bian;
+    jiao = known_pool{i}.jiao;
+    if ~isnumeric(bian) || ~isreal(bian) || size(bian, 2) ~= n
+        error('known_pool{%d}.bian must be a real numeric matrix with n=%d columns.', i, n);
+    end
+    if ~isnumeric(jiao) || ~isreal(jiao) || size(jiao, 2) ~= n + 1
+        error('known_pool{%d}.jiao must be a real numeric matrix with n+1=%d columns.', i, n + 1);
+    end
+    if any(~isfinite(bian), 'all') || any(bian ~= fix(bian), 'all')
+        error('known_pool{%d}.bian must contain finite integer-valued entries.', i);
+    end
+    if any(~isfinite(jiao), 'all') || any(jiao ~= fix(jiao), 'all')
+        error('known_pool{%d}.jiao must contain finite integer-valued entries.', i);
+    end
+
+    max_kE = max(max_kE, size(bian, 1));
+    max_kA = max(max_kA, size(jiao, 1));
+end
+
+Known_E = zeros(max_kE, n, num_known);
+Known_A = zeros(max_kA, n + 1, num_known);
+Known_E_rows = zeros(num_known, 1);
+Known_A_rows = zeros(num_known, 1);
+
+for i = 1:num_known
+    rE = size(known_pool{i}.bian, 1);
+    rA = size(known_pool{i}.jiao, 1);
+    Known_E(1:rE, :, i) = known_pool{i}.bian;
+    Known_A(1:rA, :, i) = known_pool{i}.jiao;
+    Known_E_rows(i) = rE;
+    Known_A_rows(i) = rA;
+end
+
+%% 3. Compile and run the optimized C++ MEX backend
+
+cpp_file = 'all_basis_generator.cpp';
+cc = mex.getCompilerConfigurations('C++', 'Selected');
+if isempty(cc)
+    error('No selected C++ compiler was found. Run mex -setup C++ first.');
+end
+
+if ispc
+    if contains(cc.Name, 'Visual C++') || contains(cc.Name, 'Microsoft')
+        mex_cmd = sprintf('mex -v COMPFLAGS="$COMPFLAGS /O2" CXXFLAGS="$CXXFLAGS /O2" %s', cpp_file);
+    else
+        mex_cmd = sprintf('mex -v CXXFLAGS="$CXXFLAGS -O3" %s', cpp_file);
+    end
+else
+    mex_cmd = sprintf('mex -v CXXFLAGS="$CXXFLAGS -O3" %s', cpp_file);
+end
+
+mex_output_file = ['all_basis_generator.', mexext];
+needs_compile = ~exist(mex_output_file, 'file');
+if ~needs_compile
+    mex_time = dir(mex_output_file).datenum;
+    needs_compile = dir(cpp_file).datenum > mex_time;
+end
+
+if needs_compile
+    fprintf('>>> Compiling optimized multithreaded MEX backend...\n');
+    eval(mex_cmd);
+end
+
+fprintf(['\n>>> Starting computation (n=%d, jieshu=%d, Target_RE=%d, ' ...
+    'Target_RA=%d, pingheng=%d, pu=%d)\n'], ...
+    n, jieshu, Target_RE, Target_RA, pingheng, pu);
+
+tic;
+[E_results, A_results] = all_basis_generator( ...
+    Target_RE, ...
+    Target_RA, ...
+    pingheng, ...
+    Num_Threads, ...
+    n, ...
+    jieshu, ...
+    pu, ...
+    Known_E, ...
+    Known_A, ...
+    Known_E_rows, ...
+    Known_A_rows ...
+);
+elapsed_time = toc;
+
+fprintf('>>> Finished. Elapsed time: %.3f seconds\n', elapsed_time);
+
+if Target_RE == 0
+    result_count = 0;
+    if ~isempty(A_results)
+        result_count = size(A_results, 3);
+    end
+    if pu == 0
+        equivalence_name = 'S_n column permutations';
+    else
+        equivalence_name = 'D_n shifts/full reflection';
+    end
+    fprintf('>>> Angle-only non-equivalent matrices (%s): %d\n', ...
+        equivalence_name, result_count);
+elseif Target_RA == 0
+    result_count = 0;
+    if ~isempty(E_results)
+        result_count = size(E_results, 3);
+    end
+    fprintf('>>> Edge-only non-equivalent matrices: %d\n', result_count);
+else
+    result_count = 0;
+    if ~isempty(E_results)
+        result_count = size(E_results, 3);
+    end
+    fprintf('>>> Non-equivalent joint edge-angle states: %d\n', result_count);
+end
