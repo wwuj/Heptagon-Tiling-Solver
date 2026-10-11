@@ -12,7 +12,7 @@ The programs in this repository support computational exploration of this proble
 **Algorithmic Constraints:**
 
 * The program automatically filters out angle combinations that yield no positive solutions.
-* Strict geometric rule: The degree of each vertex (i.e., the number of polygons meeting at a single vertex) must be $\e 3$.
+* Strict geometric rule: The degree of each vertex (i.e., the number of polygons meeting at a single vertex) must be 3.
 
 ## 📂 Core Files
 
