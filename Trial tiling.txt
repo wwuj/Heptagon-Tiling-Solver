@@ -1,0 +1,460 @@
+clc;
+clear heptagon_search_final; 
+
+Run_Mode = 2;  % <--- 1：台式机/HPC，2：普通笔记本
+
+% =========================================================
+% 1.清除环境变量
+% =========================================================
+setenv('KMP_AFFINITY', 'disabled');
+setenv('OMP_DISPLAY_ENV', 'false'); 
+setenv('KMP_DUPLICATE_LIB_OK', 'TRUE');
+setenv('OMP_STACKSIZE', '16M'); 
+
+fprintf('Compiling HEURISTIC C++ MEX...\n');
+cpp_file = 'heptagon_search_final.cpp'; 
+
+if Run_Mode == 1
+    fprintf('>>> 当前模式: AMD64 性能版\n');
+    if ispc
+        % Windows 环境下，若不支持 /openmp:llvm 则退回使用标准 /openmp
+        try
+            mex_cmd = sprintf('mex -v COMPFLAGS="$COMPFLAGS /openmp:llvm /O2 /arch:AVX2" %s', cpp_file);
+            eval(mex_cmd);
+        catch
+            fprintf('>>> 尝试标准 OpenMP 编译...\n');
+            mex_cmd = sprintf('mex -v COMPFLAGS="$COMPFLAGS /openmp /O2 /arch:AVX2" %s', cpp_file);
+            eval(mex_cmd);
+        end
+    else
+        mex_cmd = sprintf('mex -v CXXFLAGS=''$CXXFLAGS -O3 -fopenmp -mavx2'' LDFLAGS=''$LDFLAGS -fopenmp'' %s', cpp_file);
+        eval(mex_cmd);
+    end
+elseif Run_Mode == 2
+    fprintf('>>> 当前模式: 笔记本通用安全版\n');
+    if ispc
+        try
+            mex_cmd = sprintf('mex -v COMPFLAGS="$COMPFLAGS /openmp:llvm /O2" %s', cpp_file);
+            eval(mex_cmd);
+        catch
+            fprintf('>>> 尝试标准 OpenMP 编译...\n');
+            mex_cmd = sprintf('mex -v COMPFLAGS="$COMPFLAGS /openmp /O2" %s', cpp_file);
+            eval(mex_cmd);
+        end
+    else
+        mex_cmd = sprintf('mex -v CXXFLAGS=''$CXXFLAGS -O3 -fopenmp'' LDFLAGS=''$LDFLAGS -fopenmp'' %s', cpp_file);
+        eval(mex_cmd);
+    end
+end
+
+fprintf('>>> 编译成功！\n');
+
+
+ jilu=[];
+for k1=1:size(E_results,3)
+     E=E_results(:,:,k1);
+    A=A_results(:,:,k1);
+    % for i=1:length(known_pool)
+   %% 2. 生成所有可能的 bian (1x7, 任意两列一个1一个-1, 前1后-1)
+n_cols = 7;
+bian = [];
+for i = 1:n_cols-1
+    for j = i+1:n_cols
+        temp_row = zeros(1, n_cols);
+        temp_row(i) = 1;
+        temp_row(j) = -1;
+        bian = [bian; temp_row];
+    end
+end
+
+%disp(['生成 bian 的数量: ', num2str(size(bian, 1))]);
+
+%% 3. 生成所有可能的 jiao (1x7 任选三列填1可重叠 -> 扩展为 1x8 最后一列为2)
+jiao_base = [];
+% 逻辑：相当于取3次位置，位置索引为 a, b, c
+% 为避免重复，强制约定 a <= b <= c
+for a = 1:n_cols
+    for b = a:n_cols
+        for c = b:n_cols
+            temp_row = zeros(1, n_cols);
+            temp_row(a) = temp_row(a) + 1;
+            temp_row(b) = temp_row(b) + 1;
+            temp_row(c) = temp_row(c) + 1;
+            jiao_base = [jiao_base; temp_row];
+        end
+    end
+end
+
+% 最后一列全部加一列全部为2
+jiao = [jiao_base, 2 * ones(size(jiao_base, 1), 1)];
+
+%disp(['生成 jiao 的数量: ', num2str(size(jiao, 1))]);
+
+%% 4. 处理 E 和 bian -> 生成 Matrix_E
+% 找到 bian 中和 E 线性相关的加入 E 后面
+Matrix_E = E;
+rank_E = rank(E); % 初始秩
+
+% 线性相关的判定标准：加入新行后，矩阵的秩不发生改变
+% rank([E; v]) == rank(E)
+rows_to_add_E = [];
+for k = 1:size(bian, 1)
+    vec = bian(k, :);
+    % 检查线性相关性
+    if rank([E; vec]) == rank_E
+        rows_to_add_E = [rows_to_add_E; vec];
+    end
+end
+
+% 加入并去重
+if ~isempty(rows_to_add_E)
+    Matrix_E = [Matrix_E; rows_to_add_E];
+end
+% 去掉行一样的 (unique默认会排序，'stable'保持出现顺序，但通常矩阵集合不介意顺序)
+Matrix_E = unique(Matrix_E, 'rows');
+
+disp('Matrix_E 计算完成。尺寸：');
+disp(size(Matrix_E));
+
+%% 5. 处理 A 和 jiao -> 生成 Matrix_A
+% 找到 jiao 中和 A 线性相关的加入 A 后面
+Matrix_A = A;
+rank_A = rank(A);
+
+rows_to_add_A = [];
+for k = 1:size(jiao, 1)
+    vec = jiao(k, :);
+    % 检查线性相关性
+    if rank([A; vec]) == rank_A
+        rows_to_add_A = [rows_to_add_A; vec];
+    end
+end
+
+% 加入并去重
+if ~isempty(rows_to_add_A)
+    Matrix_A = [Matrix_A; rows_to_add_A];
+end
+Matrix_A = unique(Matrix_A, 'rows');
+
+disp('Matrix_A 计算完成。尺寸：');
+disp(size(Matrix_A));
+% Matrix_E=E_results(:,:,i);
+% Matrix_A=A_results(:,:,i);
+
+% =========================================================
+% 3. 设置参数
+% =========================================================
+Target_N =29;   % 目标块数
+
+FindAll  = 0 ;   % 1: 找所有解; 0: 找指定数量
+FindCount = 1;   % 仅当 FindAll=0 时有效，代表需要找的解的个数
+SkipEdge=0;%1代表跳过检查
+SkipAngle=0;
+
+fprintf('Starting Parallel Search for N=%d...\n', Target_N);
+if FindAll
+    fprintf('Mode: Find ALL solutions. (Extreme Bruteforce Enabled)\n');
+else
+    fprintf('Mode: Find at least %d solutions. (Fast Divergence Enabled)\n', FindCount);
+end
+
+tic;
+% 调用 C++ 函数
+res  = heptagon_search_final(Target_N, Matrix_E, Matrix_A, FindAll, FindCount, SkipEdge, SkipAngle);
+toc;
+
+% =========================================================
+% 4. 结果分析与输出
+% =========================================================
+
+% 逻辑判断：
+% 如果 FindAll=1，只要 count>0 就显示。
+% 如果 FindAll=0，必须 count >= FindCount 才算"成功" (根据你的要求)。
+% 但通常只要有解我们都想看，这里按照"如果不满足要求就输出 no solution"的严格逻辑编写。
+
+success = false;
+if FindAll == 1
+    if res.count > 0
+        success = true;
+        fprintf('Success! Found %d solutions (All).\n', res.count);
+    else
+        fprintf('No solution found.\n');
+    end
+else
+    % FindAll == 0
+    if res.count >= FindCount
+        success = true;
+        fprintf('Success! Found %d solutions (Target was %d).\n', res.count, FindCount);
+    else
+        % 找到了，但不够数量，或者根本没找到
+        if res.count == 0
+            fprintf('No solution found.\n');
+        else
+            fprintf('Warning: Only found %d solutions, but requested %d. (Considered "No Solution" by criteria)\n', res.count, FindCount);
+            % 如果你希望即使只找到1个也显示，可以把下面的 success 改为 true
+            success = false; 
+        end
+    end
+end
+if success
+    jilu=[jilu;k1];
+end
+
+% if success
+%     jilu=[jilu;k1];
+%     % 解析并展示第一个解
+%     % fprintf('\n--- Analyzing Solution 1 ---\n');
+%     % T = interpret_heptagon_data(res, 1);
+% 
+%     [E_res, A_res] = analyze_heptagon_result(res.solutions{1});
+%     fprintf('Verified Edge Rules: %d\n', size(E_res, 1));
+%     fprintf('Verified Angle Rules: %d\n', size(A_res, 1));
+% 
+%     % 如果有多个解且找到了2个以上，也可以展示第2个
+%     if res.count >= 2
+%         fprintf('\n--- Analyzing Solution 2 ---\n');
+%          interpret_heptagon_data(res, 2); % 简单调用，不重复赋值T
+%     end
+% else
+%     fprintf('Result does not meet criteria or no solution found.\n');
+% end
+end
+
+%save('jilu_result.mat', 'jilu'); 
+
+
+function ConnectionsTable = interpret_heptagon_data(res, solution_index)
+% INTERPRET_HEPTAGON_DATA 解读 C++ 搜索结果并输出连接列表
+%
+% 输入:
+%   res            : C++ mexFunction 返回的结构体 (包含 .count 和 .solutions)
+%   solution_index : (可选) 指定查看第几个解，默认为 1
+%
+% 输出:
+%   ConnectionsTable : 包含完整连接信息的 MATLAB Table
+%
+
+    % 1. 检查输入
+    if nargin < 2
+        solution_index = 1;
+    end
+
+    if res.count == 0
+        fprintf('结果为空 (res.count = 0)，无法解读。\n');
+        ConnectionsTable = [];
+        return;
+    end
+
+    if solution_index > res.count
+        error('指定的解索引 (%d) 超出总解数 (%d)。', solution_index, res.count);
+    end
+
+    % 2. 获取原始数据矩阵
+    % 数据格式: Target_N 行 x 7 列
+    % 矩阵中的值 = (邻居ID_1based * 100) + 邻居边ID_0to6
+    RawMatrix = res.solutions{solution_index};
+    [N, ~] = size(RawMatrix);
+
+    fprintf('=======================================================\n');
+    fprintf('           七边形拼接解 %d (共 %d 个块)\n', solution_index, N);
+    fprintf('=======================================================\n');
+    fprintf('| %-10s | %-10s | %-4s | %-10s | %-10s |\n', '本块ID', '本块边(0-6)', '连接', '邻居ID', '邻居边(0-6)');
+    fprintf('|------------|------------|------|------------|------------|\n');
+
+    % 用于存储表格数据的数组
+    src_blocks = [];
+    src_sides  = [];
+    dst_blocks = [];
+    dst_sides  = [];
+
+    % 3. 遍历解析
+    for i = 1:N
+        for side = 0:6
+            % MATLAB 列索引从1开始，所以 side+1
+            val = RawMatrix(i, side + 1);
+
+            % val = 0 表示该边未连接（空气）
+            if val == 0
+                continue;
+            end
+
+            % 解码逻辑 (对应 C++: (block_id + 1) * 100 + side)
+            neighbor_id = floor(double(val) / 100);
+            neighbor_side = mod(double(val), 100);
+
+            % 为了避免输出重复信息 (例如 A->B 和 B->A)，我们通常只打印 ID 较小指向较大的，
+            % 或者全部打印。
+            % 既然要求"明确列表输出"，为了查阅方便，这里输出【每一条】连接。
+
+            fprintf('| %-10d | %-10d | <--> | %-10d | %-10d |\n', ...
+                i, side, neighbor_id, neighbor_side);
+
+            % 收集数据用于生成 Table
+            src_blocks = [src_blocks; i];
+            src_sides  = [src_sides; side];
+            dst_blocks = [dst_blocks; neighbor_id];
+            dst_sides  = [dst_sides; neighbor_side];
+        end
+        % 每块之间画个分隔线，方便阅读
+        % fprintf('|------------|------------|------|------------|------------|\n');
+    end
+    fprintf('=======================================================\n');
+
+    % 4. 生成返回值 Table
+    ConnectionsTable = table(src_blocks, src_sides, dst_blocks, dst_sides, ...
+        'VariableNames', {'Self_ID', 'Self_Side', 'Neighbor_ID', 'Neighbor_Side'});
+
+    % 简单的统计信息
+    total_edges = size(src_blocks, 1);
+    fprintf('统计: 共使用了 %d 个块，存在 %d 个连接面 (总边数的一半)。\n', N, total_edges/2);
+end
+
+
+function [Matrix_E_Res, Matrix_A_Res] = analyze_heptagon_result(adj_matrix)
+    % 输入: adj_matrix 是 res.solutions{k}，大小为 N x 7
+    % 输出: 
+    %   Matrix_E_Res: 边矩阵 (去重后)
+    %   Matrix_A_Res: 角矩阵 (去重后)
+
+    [N, ~] = size(adj_matrix);
+
+    % --- 数据解析函数 ---
+    % 结果存储格式为: (BlockID + 1) * 100 + SideIndex
+    % SideIndex 0-13 包含了顺逆时针信息
+    decode_node = @(val) floor(val / 100);     % 获取块ID (1 ~ N)
+    decode_side = @(val) mod(val, 100);        % 获取边的编号 (0 ~ 13)
+
+    % --- 几何计算函数 ---
+    % 计算真实的边编号 (0-6)，忽略顺逆时针差异，因为几何形状不变
+    get_real_side = @(s) mod(s, 7);
+
+    % 获取某条边的“前一条边” (在块内部相邻)
+    % 在七边形中，边 i 的前一条边总是 (i+6)%7
+    get_prev_side = @(s) mod(s + 6, 7);
+
+    % 计算角度类型
+    % 规则：夹角由两边编号最大值决定 (0和6例外)
+    function angle = calc_angle(s1, s2)
+        r1 = mod(s1, 7);
+        r2 = mod(s2, 7);
+        if (r1 == 0 && r2 == 6) || (r1 == 6 && r2 == 0)
+            angle = 0; 
+        else
+            angle = max(r1, r2);
+        end
+    end
+
+    % =========================================================
+    % 1. 还原边矩阵 (Matrix E)
+    % =========================================================
+    edge_rows = [];
+    for i = 1:N
+        for j = 1:7 
+            val = adj_matrix(i, j); % i块的第 j-1 边
+            if val == 0, continue; end
+
+            neighbor_id = decode_node(val);
+            neighbor_side_idx = decode_side(val); % 邻居是用哪个边连过来的
+
+            % 为了不重复记录，只处理 id 小连向 id 大的情况
+            if i < neighbor_id
+                u = get_real_side(j-1);         % 自己的真实边 (0-6)
+                v = get_real_side(neighbor_side_idx); % 邻居的真实边 (0-6)
+
+                if u ~= v
+                    row = zeros(1, 7);
+                    row(min(u,v)+1) = 1;
+                    row(max(u,v)+1) = -1;
+                    edge_rows = [edge_rows; row];
+                end
+            end
+        end
+    end
+    if ~isempty(edge_rows)
+        Matrix_E_Res = unique(edge_rows, 'rows');
+    else
+        Matrix_E_Res = [];
+    end
+
+    % =========================================================
+    % 2. 还原角矩阵 (Matrix A) - 寻找三阶顶点
+    % =========================================================
+    angle_rows = [];
+
+    % 遍历每一个块 i 的每一个角
+    % 一个角由两条相邻边组成：边 side_curr 和 边 side_prev
+    for i = 1:N
+        for side_curr = 0:6
+            side_prev = get_prev_side(side_curr);
+
+            % 1. 看看这两个相邻边分别连着谁
+            val_Q = adj_matrix(i, side_curr + 1);       % 连向 Q
+            val_K = adj_matrix(i, side_prev + 1);       % 连向 K
+
+            % 如果有任一边没连，说明这个角没闭合
+            if val_Q == 0 || val_K == 0, continue; end
+
+            Q = decode_node(val_Q);
+            K = decode_node(val_K);
+
+            % 2. 验证 Q 和 K 是否也连着 (形成闭环 P-Q-K)
+            % 我们去 Q 的连接表里找，看有没有连向 K 的
+            is_closed = false;
+            side_Q_to_K = -1; % Q 用哪条边连向 K
+
+            for s = 1:7
+                if decode_node(adj_matrix(Q, s)) == K
+                    is_closed = true;
+                    side_Q_to_K = s - 1; % 找到连接边
+                    break;
+                end
+            end
+
+            % 3. 如果闭合，说明这是一个三阶顶点
+            % 为了不重复计算 (例如算过 P-Q-K，就不再算 Q-K-P 和 K-P-Q)，
+            % 我们只在 i 是三者中ID最小的时候记录
+            if is_closed && i < Q && i < K
+
+                % --- 现在我们知道这三个块共顶点了，开始算角 ---
+
+                % 角1 (在 P 上): 由 P 的 side_curr 和 side_prev 夹成
+                angle_P = calc_angle(side_curr, side_prev);
+
+                % 角2 (在 Q 上): 
+                % Q 连向 P 的边是 val_Q 中记录的 side (邻居的边)
+                side_Q_to_P = decode_side(val_Q);
+                % Q 连向 K 的边是刚才找到的 side_Q_to_K
+                angle_Q = calc_angle(side_Q_to_P, side_Q_to_K);
+
+                % 角3 (在 K 上):
+                % K 连向 P 的边是 val_K 中记录的 side
+                side_K_to_P = decode_side(val_K);
+                % K 连向 Q 的边？我们需要去 K 的表里找一下连 Q 的边
+                side_K_to_Q = -1;
+                for s = 1:7
+                    if decode_node(adj_matrix(K, s)) == Q
+                        side_K_to_Q = s - 1;
+                        break;
+                    end
+                end
+                angle_K = calc_angle(side_K_to_P, side_K_to_Q);
+
+                % --- 记录结果 ---
+                row = zeros(1, 8);
+                % MATLAB 下标从1开始，所以角度值要+1
+                if angle_P < 7, row(angle_P+1) = row(angle_P+1) + 1; end
+                if angle_Q < 7, row(angle_Q+1) = row(angle_Q+1) + 1; end
+                if angle_K < 7, row(angle_K+1) = row(angle_K+1) + 1; end
+                row(8) = 2; % 最后一列固定为2
+
+                angle_rows = [angle_rows; row];
+            end
+        end
+    end
+
+    if ~isempty(angle_rows)
+        Matrix_A_Res = unique(angle_rows, 'rows');
+    else
+        Matrix_A_Res = [];
+    end
+end
