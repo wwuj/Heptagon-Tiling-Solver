@@ -1,10 +1,8 @@
 # Heptagon-Tiling-Solver
 
-Tools for generating edge-angle constraint matrices and constructing trial tilings by congruent heptagons.
+This project explores edge-to-edge tilings of the hyperbolic plane $\mathbb{H}^2$ in the Poincaré disk model by congruent heptagons.
 
 ## 📌 About This Project
-
-This project explores edge-to-edge tilings of the hyperbolic plane $\mathbb{H}^2$ in the Poincaré disk model by congruent heptagons, with exactly three tiles meeting at every vertex.
 
 The programs in this repository support computational exploration of this problem in two stages:
 
@@ -14,7 +12,7 @@ The programs in this repository support computational exploration of this proble
 **Algorithmic Constraints:**
 
 * The program automatically filters out angle combinations that yield no positive solutions.
-* Strict geometric rule: The degree of each vertex (i.e., the number of polygons meeting at a single vertex) must be $\ge 3$.
+* Strict geometric rule: The degree of each vertex (i.e., the number of polygons meeting at a single vertex) must be $\e 3$.
 
 ## 📂 Core Files
 
